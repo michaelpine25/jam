@@ -2,16 +2,6 @@
 
 import { useRef, useCallback } from "react";
 
-export type Chord = { label: string; notes: number[] };
-
-export const CHORDS: Chord[] = [
-  { label: "F/A", notes: [220.00, 349.23, 440.00] },
-  { label: "C",   notes: [261.63, 329.63, 392.00] }, // C4 E4 G4
-  { label: "Bb",  notes: [233.08, 293.66, 349.23] }, // Bb3 D4 F4
-  { label: "F",   notes: [261.63, 349.23, 440.00] }, // C4 F4 A4
-  { label: "Dm",  notes: [293.66, 349.23, 440.00] }, // D4 F4 A4
-];
-
 export function useChordAudio() {
   const ctxRef = useRef<AudioContext | null>(null);
   const oscsRef = useRef<OscillatorNode[]>([]);
@@ -23,7 +13,7 @@ export function useChordAudio() {
     activeRef.current = -1;
   }, []);
 
-  const play = useCallback((index: number) => {
+  const play = useCallback((index: number, notes: number[]) => {
     if (index === activeRef.current) return;
     stop();
 
@@ -32,7 +22,7 @@ export function useChordAudio() {
     if (ac.state === "suspended") ac.resume();
 
     activeRef.current = index;
-    CHORDS[index].notes.forEach(freq => {
+    notes.forEach(freq => {
       const osc = ac.createOscillator();
       const gain = ac.createGain();
       osc.type = "triangle";
