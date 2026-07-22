@@ -8,6 +8,7 @@ import { useChordConfig } from "../hooks/useChordConfig";
 import ChordEditor from "./ChordEditor";
 
 function isHandClosed(landmarks: Landmark[]): boolean {
+  if (landmarks.length < 21) return false;
   const tips = [8, 12, 16, 20];
   const pips = [6, 10, 14, 18];
   return tips.filter((tip, i) => landmarks[tip].y > landmarks[pips[i]].y).length >= 3;
@@ -86,7 +87,7 @@ export default function HandTracker() {
   const onDraw = useCallback(({ ctx, landmarks, toCanvas, width: w, height: h }: DrawContext) => {
     const chords = chordsRef.current;
 
-    const cx = w / 2;
+    const cx = w * 0.7;
     const cy = h / 2;
     const r = Math.min(w, h) * 0.28;
     const slice = TWO_PI / Math.max(chords.length, 1);
@@ -97,6 +98,7 @@ export default function HandTracker() {
     let filterHand: Landmark[] | null = null;
 
     for (const hand of landmarks) {
+      if (hand.length < 21) continue;
       const [tx, ty] = toCanvas(hand[8].x, hand[8].y);
       const seg = chords.length > 0 ? hitSegment(tx, ty, cx, cy, r, chords.length) : -1;
       if (seg >= 0 && chordHand === null) {
