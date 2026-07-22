@@ -15,6 +15,8 @@ function isHandClosed(landmarks: Landmark[]): boolean {
 
 const TWO_PI = Math.PI * 2;
 const START_ANGLE = -Math.PI / 2;
+const MIN_CUTOFF = 200;
+const MAX_CUTOFF = 8000;
 
 function hitSegment(px: number, py: number, cx: number, cy: number, r: number, count: number): number {
   const dx = px - cx;
@@ -26,11 +28,47 @@ function hitSegment(px: number, py: number, cx: number, cy: number, r: number, c
   return Math.floor(normalized / slice);
 }
 
+function drawDots(ctx: CanvasRenderingContext2D, hand: Landmark[], toCanvas: (x: number, y: number) => [number, number], color: string) {
+  for (const { x, y } of hand) {
+    const [px, py] = toCanvas(x, y);
+    ctx.beginPath();
+    ctx.arc(px, py, 6, 0, TWO_PI);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+}
+
+function drawFilterMeter(ctx: CanvasRenderingContext2D, wx: number, wy: number, level: number) {
+  const barH = 90;
+  const barW = 10;
+  const bx = wx + 22;
+  const by = wy - barH / 2;
+
+  // Track
+  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  ctx.fillRect(bx, by, barW, barH);
+
+  // Fill with brightness gradient
+  const fillH = barH * level;
+  const grad = ctx.createLinearGradient(bx, by, bx, by + barH);
+  grad.addColorStop(0, "#fbbf24");
+  grad.addColorStop(1, "#1e40af");
+  ctx.fillStyle = grad;
+  ctx.fillRect(bx, by + barH - fillH, barW, fillH);
+
+  // Label
+  ctx.font = "bold 10px sans-serif";
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.fillText("FILTER", bx + barW / 2, by + barH + 4);
+}
+
 export default function HandTracker() {
   const handClosedRef = useRef<boolean[]>([false, false]);
   const [chords, setChords] = useChordConfig();
   const [editorOpen, setEditorOpen] = useState(false);
-  const { play, stop } = useChordAudio();
+  const { play, stop, setFilterCutoff } = useChordAudio();
 
   const { videoRef, landmarksRef } = useHandTracker({
     onResults(landmarks) {
@@ -47,62 +85,84 @@ export default function HandTracker() {
 
   const onDraw = useCallback(({ ctx, landmarks, toCanvas, width: w, height: h }: DrawContext) => {
     const chords = chordsRef.current;
-    if (chords.length === 0) return;
 
     const cx = w / 2;
     const cy = h / 2;
     const r = Math.min(w, h) * 0.28;
-    const slice = TWO_PI / chords.length;
+    const slice = TWO_PI / Math.max(chords.length, 1);
 
-    // Find active segment from any hand's index finger tip (landmark 8)
+    // Assign roles: first hand inside the wheel = chord, any other = filter
     let activeSegment = -1;
+    let chordHand: Landmark[] | null = null;
+    let filterHand: Landmark[] | null = null;
+
     for (const hand of landmarks) {
       const [tx, ty] = toCanvas(hand[8].x, hand[8].y);
-      const seg = hitSegment(tx, ty, cx, cy, r, chords.length);
-      if (seg >= 0) { activeSegment = seg; break; }
+      const seg = chords.length > 0 ? hitSegment(tx, ty, cx, cy, r, chords.length) : -1;
+      if (seg >= 0 && chordHand === null) {
+        activeSegment = seg;
+        chordHand = hand;
+      } else if (filterHand === null) {
+        filterHand = hand;
+      }
     }
 
+    // Chord audio
     if (activeSegment >= 0) play(activeSegment, chords[activeSegment].notes);
     else stop();
 
-    // Draw wheel segments
-    chords.forEach(({ label }, i) => {
-      const startAngle = START_ANGLE + i * slice;
-      const endAngle = startAngle + slice;
-      const isActive = i === activeSegment;
-      const hue = (i / chords.length) * 300 + 200;
+    // Filter control: map free hand's wrist Y (0=top→bright, 1=bottom→dark)
+    if (filterHand) {
+      const level = 1 - Math.max(0, Math.min(1, filterHand[0].y));
+      setFilterCutoff(MIN_CUTOFF * Math.pow(MAX_CUTOFF / MIN_CUTOFF, level));
+    } else {
+      setFilterCutoff(5000); // default when no filter hand
+    }
 
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.arc(cx, cy, r, startAngle, endAngle);
-      ctx.closePath();
-      ctx.fillStyle = isActive
-        ? `hsla(${hue}, 85%, 62%, 0.88)`
-        : `hsla(${hue}, 55%, 28%, 0.5)`;
-      ctx.fill();
-      ctx.strokeStyle = "rgba(255,255,255,0.7)";
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+    // Draw chord wheel
+    if (chords.length > 0) {
+      chords.forEach(({ label }, i) => {
+        const startAngle = START_ANGLE + i * slice;
+        const endAngle = startAngle + slice;
+        const isActive = i === activeSegment;
+        const hue = (i / chords.length) * 300 + 200;
 
-      const mid = startAngle + slice / 2;
-      ctx.font = "bold 26px sans-serif";
-      ctx.fillStyle = "white";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, cx + r * 0.65 * Math.cos(mid), cy + r * 0.65 * Math.sin(mid));
-    });
-
-    // Hand landmark dots
-    for (const hand of landmarks) {
-      for (const { x, y } of hand) {
-        const [px, py] = toCanvas(x, y);
         ctx.beginPath();
-        ctx.arc(px, py, 6, 0, TWO_PI);
-        ctx.fillStyle = "lime";
+        ctx.moveTo(cx, cy);
+        ctx.arc(cx, cy, r, startAngle, endAngle);
+        ctx.closePath();
+        ctx.fillStyle = isActive
+          ? `hsla(${hue}, 85%, 62%, 0.88)`
+          : `hsla(${hue}, 55%, 28%, 0.5)`;
         ctx.fill();
+        ctx.strokeStyle = "rgba(255,255,255,0.7)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        const mid = startAngle + slice / 2;
+        ctx.font = "bold 26px sans-serif";
+        ctx.fillStyle = "white";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, cx + r * 0.65 * Math.cos(mid), cy + r * 0.65 * Math.sin(mid));
+      });
+    }
+
+    // Draw hand dots + filter meter
+    if (chordHand) drawDots(ctx, chordHand, toCanvas, "#4ade80");
+    if (filterHand) {
+      drawDots(ctx, filterHand, toCanvas, "#22d3ee");
+      const [wx, wy] = toCanvas(filterHand[0].x, filterHand[0].y);
+      const level = 1 - Math.max(0, Math.min(1, filterHand[0].y));
+      drawFilterMeter(ctx, wx, wy, level);
+    }
+    // Hands not assigned a role yet (e.g., both outside wheel) get neutral dots
+    for (const hand of landmarks) {
+      if (hand !== chordHand && hand !== filterHand) {
+        drawDots(ctx, hand, toCanvas, "#a3a3a3");
       }
     }
-  }, [play, stop]);
+  }, [play, stop, setFilterCutoff]);
 
   return (
     <>
@@ -125,11 +185,7 @@ export default function HandTracker() {
       )}
 
       {editorOpen && (
-        <ChordEditor
-          chords={chords}
-          onChange={setChords}
-          onClose={() => setEditorOpen(false)}
-        />
+        <ChordEditor chords={chords} onChange={setChords} onClose={() => setEditorOpen(false)} />
       )}
     </>
   );
