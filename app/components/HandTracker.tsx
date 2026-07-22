@@ -1,134 +1,95 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useRef, useCallback } from "react";
+import { useHandTracker, Landmark } from "../hooks/useHandTracker";
+import CameraView, { DrawContext } from "./CameraView";
+import { useChordAudio, CHORDS } from "../hooks/useChordAudio";
 
-declare global {
-  interface Window {
-    Hands: any;
-  }
-}
-
-function isHandClosed(landmarks: any[]): boolean {
+function isHandClosed(landmarks: Landmark[]): boolean {
   const tips = [8, 12, 16, 20];
   const pips = [6, 10, 14, 18];
   const curled = tips.filter((tip, i) => landmarks[tip].y > landmarks[pips[i]].y);
   return curled.length >= 3;
 }
 
+const TWO_PI = Math.PI * 2;
+const START_ANGLE = -Math.PI / 2;
+const SLICE = TWO_PI / CHORDS.length;
+
+function hitSegment(px: number, py: number, cx: number, cy: number, r: number): number {
+  const dx = px - cx;
+  const dy = py - cy;
+  if (dx * dx + dy * dy > r * r) return -1;
+  const angle = Math.atan2(dy, dx);
+  const normalized = ((angle - START_ANGLE) % TWO_PI + TWO_PI) % TWO_PI;
+  return Math.floor(normalized / SLICE);
+}
+
 export default function HandTracker() {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const handClosedRef = useRef<boolean[]>([false, false]);
+  const { play, stop } = useChordAudio();
 
-  useEffect(() => {
-    let animationFrameId: number;
-    let onResize: (() => void) | null = null;
-
-    const setup = async () => {
-      if (!videoRef.current || !canvasRef.current || !window.Hands) return;
-
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
+  const { videoRef, landmarksRef } = useHandTracker({
+    onResults(landmarks) {
+      landmarks.forEach((hand, i) => {
+        const closed = isHandClosed(hand);
+        if (closed && !handClosedRef.current[i]) console.log("hand closed");
+        handClosedRef.current[i] = closed;
       });
-      video.srcObject = stream;
-      await video.play();
+    },
+  });
 
-      const dpr = window.devicePixelRatio || 1;
+  const onDraw = useCallback(({ ctx, landmarks, toCanvas, width: w, height: h }: DrawContext) => {
+    const cx = w / 2;
+    const cy = h / 2;
+    const r = Math.min(w, h) * 0.28;
 
-      onResize = () => {
-        canvas.width = window.innerWidth * dpr;
-        canvas.height = window.innerHeight * dpr;
-      };
-      onResize();
-      window.addEventListener("resize", onResize);
+    // Find which chord segment the index finger tip (landmark 8) is pointing at
+    let activeSegment = -1;
+    for (const hand of landmarks) {
+      const [tx, ty] = toCanvas(hand[8].x, hand[8].y);
+      const seg = hitSegment(tx, ty, cx, cy, r);
+      if (seg >= 0) { activeSegment = seg; break; }
+    }
 
-      const hands = new window.Hands({
-        locateFile: (file: string) =>
-          `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
-      });
+    if (activeSegment >= 0) play(activeSegment);
+    else stop();
 
-      hands.setOptions({
-        maxNumHands: 2,
-        modelComplexity: 1,
-        minDetectionConfidence: 0.7,
-        minTrackingConfidence: 0.7,
-      });
+    // Chord wheel
+    CHORDS.forEach(({ label }, i) => {
+      const startAngle = START_ANGLE + i * SLICE;
+      const endAngle = startAngle + SLICE;
+      const isActive = i === activeSegment;
 
-      hands.onResults((results: any) => {
-        const cw = canvas.width;
-        const ch = canvas.height;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, r, startAngle, endAngle);
+      ctx.closePath();
+      ctx.fillStyle = isActive ? "rgba(255, 210, 0, 0.8)" : "rgba(30, 60, 200, 0.45)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
 
-        // Cover-fit: crop the video to fill the canvas without stretching
-        const videoAspect = video.videoWidth / video.videoHeight;
-        const canvasAspect = cw / ch;
-        let sx = 0, sy = 0, sw = video.videoWidth, sh = video.videoHeight;
-        if (videoAspect > canvasAspect) {
-          sw = video.videoHeight * canvasAspect;
-          sx = (video.videoWidth - sw) / 2;
-        } else {
-          sh = video.videoWidth / canvasAspect;
-          sy = (video.videoHeight - sh) / 2;
-        }
+      const mid = startAngle + SLICE / 2;
+      ctx.font = "bold 28px sans-serif";
+      ctx.fillStyle = "white";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, cx + r * 0.65 * Math.cos(mid), cy + r * 0.65 * Math.sin(mid));
+    });
 
-        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, cw, ch);
+    // Hand landmark dots
+    for (const hand of landmarks) {
+      for (const { x, y } of hand) {
+        const [px, py] = toCanvas(x, y);
+        ctx.beginPath();
+        ctx.arc(px, py, 6, 0, TWO_PI);
+        ctx.fillStyle = "lime";
+        ctx.fill();
+      }
+    }
+  }, [play, stop]);
 
-        if (results.multiHandLandmarks) {
-          results.multiHandLandmarks.forEach((landmarks: any[], i: number) => {
-            const closed = isHandClosed(landmarks);
-            if (closed && !handClosedRef.current[i]) {
-              console.log("hand closed");
-            }
-            handClosedRef.current[i] = closed;
-          });
-
-          for (const landmarks of results.multiHandLandmarks) {
-            for (const point of landmarks) {
-              // Remap landmark coords to match the cropped region
-              const lx = ((point.x * video.videoWidth - sx) / sw) * cw;
-              const ly = ((point.y * video.videoHeight - sy) / sh) * ch;
-              ctx.beginPath();
-              ctx.arc(lx, ly, 5 * dpr, 0, 2 * Math.PI);
-              ctx.fill();
-            }
-          }
-        }
-      });
-
-      const loop = async () => {
-        await hands.send({ image: video });
-        animationFrameId = requestAnimationFrame(loop);
-      };
-
-      loop();
-    };
-
-    setup();
-
-    return () => {
-      cancelAnimationFrame(animationFrameId);
-      if (onResize) window.removeEventListener("resize", onResize);
-    };
-  }, []);
-
-  return (
-    <div style={{ margin: 0, padding: 0, overflow: "hidden" }}>
-      <video ref={videoRef} style={{ display: "none" }} />
-      <canvas
-        ref={canvasRef}
-        style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          width: "100vw",
-          height: "100vh",
-          transform: "scaleX(-1)",
-        }}
-      />
-    </div>
-  );
+  return <CameraView videoRef={videoRef} landmarksRef={landmarksRef} onDraw={onDraw} />;
 }
